@@ -1,0 +1,16 @@
+{
+  "name": "travel-agency-bot",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "google-auth-library": "^9.15.1",
+    "google-spreadsheet": "^4.1.4",
+    "https-proxy-agent": "^7.0.6",
+    "openai": "^4.82.0",
+    "telegraf": "^4.16.3"
+  }
+}
