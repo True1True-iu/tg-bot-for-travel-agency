@@ -10,7 +10,8 @@ delete process.env.https_proxy;
 module.exports = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   HTTPS_PROXY,
-  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+  GROQ_API_KEY: process.env.GROQ_API_KEY,
+  GROQ_MODEL: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
   GOOGLE_SHEET_ID: process.env.GOOGLE_SHEET_ID,
   GOOGLE_SERVICE_ACCOUNT_EMAIL: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
   GOOGLE_PRIVATE_KEY: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, "\n"),

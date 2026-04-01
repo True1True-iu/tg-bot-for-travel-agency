@@ -1,7 +1,7 @@
 const { Markup } = require("telegraf");
 const { State, STEPS, getStepByState, getNextState } = require("./states");
 const { getSession, resetSession } = require("./session");
-const { getRedirectMessage, fallback } = require("./ai");
+const { getRedirectMessage } = require("./ai");
 const {
   appendRow,
   findActiveRequest,
@@ -51,6 +51,20 @@ function looksLikeGibberish(text) {
   return false;
 }
 
+function looksLikeRandomWord(text) {
+  const normalized = text.trim();
+  if (!/^[a-zA-Zа-яА-ЯёЁ]+$/u.test(normalized)) return false;
+  if (normalized.length < 5) return false;
+
+  const lower = normalized.toLowerCase();
+  const hasTripleVowels = /[аеёиоуыэюяaeiou]{3,}/i.test(lower);
+  const hasConsonantTail =
+    /[бвгджзйклмнпрстфхцчшщbcdfghjklmnpqrstvwxyz]{3,}$/i.test(lower);
+  const hasRepeatedChars = /(.)\1/u.test(lower);
+
+  return hasTripleVowels || hasConsonantTail || hasRepeatedChars;
+}
+
 const RU_CONSONANTS = "бвгджзйклмнпрстфхцчшщъь";
 const EN_CONSONANTS = "bcdfghjklmnpqrstvwxyz";
 const CONSONANTS_RE = new RegExp(
@@ -74,10 +88,46 @@ const fieldValidators = {
     if (NUMBER_WORDS_RE.test(text)) return null;
     return "Укажите количество человек (например, 2 взрослых, 1 ребёнок).";
   },
+  dates(text) {
+    const normalized = text.trim().toLowerCase();
+    if (
+      /^(не знаю|не знаю даже|пока не знаю|еще не знаю|ещё не знаю|не определился|не определились|не решил|не решили|без разницы|не важно|неважно)$/i.test(
+        normalized,
+      )
+    ) {
+      return "Пожалуйста, укажите даты или период поездки (например, 15.06 - 25.06 или в августе).";
+    }
+    return null;
+  },
   budget(text) {
     if (/\d/.test(text)) return null;
     if (/не знаю|любой|без ограничен|не важно|неважно/i.test(text)) return null;
     return "Укажите бюджет (например, 150 000 руб. или «без ограничений»).";
+  },
+  destination(text) {
+    const normalized = text.trim().toLowerCase();
+    if (
+      /^(хоть куда|куда угодно|любой вариант|любое направление|не имеет значения|не важно|неважно|без разницы|все равно|всё равно|не принципиально|не знаю|не знаю даже|пока не знаю|еще не знаю|ещё не знаю)$/i.test(
+        normalized,
+      )
+    ) {
+      return "Пожалуйста, укажите конкретное направление: страну, город или курорт.";
+    }
+    return null;
+  },
+  departureCity(text) {
+    const normalized = text.trim().toLowerCase();
+    if (
+      /^(любой|хоть какой|не знаю|не важно|неважно|без разницы|не принципиально)$/i.test(
+        normalized,
+      )
+    ) {
+      return "Пожалуйста, укажите конкретный город вылета (например, Москва, Казань, Санкт-Петербург).";
+    }
+    if (!/^[a-zA-Zа-яА-ЯёЁ\s\-]{2,}$/u.test(text.trim())) {
+      return "Укажите город вылета текстом (например, Москва, Казань, Санкт-Петербург).";
+    }
+    return null;
   },
 };
 
@@ -110,6 +160,12 @@ function sendConfirmation(ctx, session) {
       [Markup.button.callback("\u274C Отменить", "confirm_cancel")],
     ]),
   );
+}
+
+async function sendAiRedirect(ctx, userText, currentQuestion) {
+  await ctx.sendChatAction("typing");
+  const msg = await getRedirectMessage(userText, currentQuestion);
+  return ctx.reply(msg);
 }
 
 function registerHandlers(bot) {
@@ -272,29 +328,34 @@ function registerHandlers(bot) {
     if (!step) return;
 
     if (looksLikeGibberish(text)) {
-      const msg = await getRedirectMessage(text, step.prompt);
-      return ctx.reply(msg);
+      console.log(`[flow] ai redirect: gibberish (${step.field})`);
+      return sendAiRedirect(ctx, text, step.prompt);
     }
 
     const validator = fieldValidators[step.field];
     if (validator) {
       const err = validator(text);
       if (err) {
-        return ctx.reply(`${err}\n\n${step.prompt}`);
+        return ctx.reply(err);
       }
     }
 
     if (step.field === "phone") {
       const cleaned = text.replace(/[\s\-()]/g, "");
       if (!/^\+?\d{10,15}$/.test(cleaned)) {
-        const msg = await getRedirectMessage(text, step.prompt);
-        return ctx.reply(msg);
+        console.log("[flow] ai redirect: invalid phone");
+        return sendAiRedirect(ctx, text, step.prompt);
       }
     }
 
+    if (step.field === "destination" && looksLikeRandomWord(text)) {
+      console.log("[flow] ai redirect: suspicious destination");
+      return sendAiRedirect(ctx, text, step.prompt);
+    }
+
     if (step.field !== "phone" && looksLikeQuestion(text)) {
-      const msg = await getRedirectMessage(text, step.prompt);
-      return ctx.reply(msg);
+      console.log(`[flow] ai redirect: question-instead-of-answer (${step.field})`);
+      return sendAiRedirect(ctx, text, step.prompt);
     }
 
     session.data[step.field] = text;
