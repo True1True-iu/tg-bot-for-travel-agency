@@ -1,9 +1,10 @@
 const { State } = require("./states");
 
 const sessions = new Map();
+const MAX_HISTORY = 10;
 
 function createSession() {
-  return { state: State.IDLE, editingField: null, data: {} };
+  return { state: State.IDLE, editingField: null, data: {}, history: [] };
 }
 
 function getSession(chatId) {
@@ -17,4 +18,22 @@ function resetSession(chatId) {
   sessions.set(chatId, createSession());
 }
 
-module.exports = { getSession, resetSession };
+function addHistoryMessage(chatId, role, content) {
+  const session = getSession(chatId);
+  session.history.push({ role, content });
+  if (session.history.length > MAX_HISTORY) {
+    session.history = session.history.slice(-MAX_HISTORY);
+  }
+}
+
+function getRecentHistory(chatId, limit = MAX_HISTORY) {
+  const session = getSession(chatId);
+  return session.history.slice(-limit);
+}
+
+module.exports = {
+  getSession,
+  resetSession,
+  addHistoryMessage,
+  getRecentHistory,
+};

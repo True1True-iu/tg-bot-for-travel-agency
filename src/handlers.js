@@ -1,7 +1,12 @@
 const { Markup } = require("telegraf");
 const { State, STEPS, getStepByState, getNextState } = require("./states");
-const { getSession, resetSession } = require("./session");
-const { getRedirectMessage } = require("./ai");
+const {
+  getSession,
+  resetSession,
+  addHistoryMessage,
+  getRecentHistory,
+} = require("./session");
+const { getRedirectMessage, getAssistantMessage } = require("./ai");
 const {
   appendRow,
   findActiveRequest,
@@ -106,6 +111,7 @@ const fieldValidators = {
   },
   destination(text) {
     const normalized = text.trim().toLowerCase();
+    const compact = normalized.replace(/\s+/g, "");
     if (
       /^(хоть куда|куда угодно|любой вариант|любое направление|не имеет значения|не важно|неважно|без разницы|все равно|всё равно|не принципиально|не знаю|не знаю даже|пока не знаю|еще не знаю|ещё не знаю)$/i.test(
         normalized,
@@ -113,12 +119,18 @@ const fieldValidators = {
     ) {
       return "Пожалуйста, укажите конкретное направление: страну, город или курорт.";
     }
+    if (/^\d+$/.test(compact) || compact.length < 2) {
+      return "Пожалуйста, укажите направление текстом: страну, город или курорт (например, Турция, Сочи, Дубай).";
+    }
+    if (!/[a-zA-Zа-яА-ЯёЁ]/u.test(normalized)) {
+      return "Пожалуйста, укажите направление текстом: страну, город или курорт.";
+    }
     return null;
   },
   departureCity(text) {
     const normalized = text.trim().toLowerCase();
     if (
-      /^(любой|хоть какой|не знаю|не важно|неважно|без разницы|не принципиально)$/i.test(
+      /^(любой|из любого|хоть какой|хоть откуда|куда угодно|не знаю|не важно|неважно|без разницы|не принципиально)$/i.test(
         normalized,
       )
     ) {
@@ -151,6 +163,20 @@ function buildSheetSummary(d) {
   ].join("\n");
 }
 
+function isApplicationComplete(data) {
+  return STEPS.every((s) => {
+    const value = data[s.field];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+}
+
+function getFirstMissingStep(data) {
+  return STEPS.find((s) => {
+    const value = data[s.field];
+    return !(typeof value === "string" && value.trim().length > 0);
+  });
+}
+
 function sendConfirmation(ctx, session) {
   return ctx.reply(
     `\u{1F4CB} Ваша заявка:\n\n${buildSummary(session.data)}\n\nВсё верно?`,
@@ -164,12 +190,29 @@ function sendConfirmation(ctx, session) {
 
 async function sendAiRedirect(ctx, userText, currentQuestion) {
   await ctx.sendChatAction("typing");
-  const msg = await getRedirectMessage(userText, currentQuestion);
+  const history = getRecentHistory(ctx.chat.id, 10);
+  const msg = await getRedirectMessage(userText, currentQuestion, history);
+  addHistoryMessage(ctx.chat.id, "user", userText);
+  addHistoryMessage(ctx.chat.id, "assistant", msg);
   return ctx.reply(msg);
+}
+
+async function sendAssistantReply(ctx, userText) {
+  await ctx.sendChatAction("typing");
+  const history = getRecentHistory(ctx.chat.id, 10);
+  const msg = await getAssistantMessage(userText, history);
+  addHistoryMessage(ctx.chat.id, "user", userText);
+  addHistoryMessage(ctx.chat.id, "assistant", msg);
+  return ctx.reply(msg, menuKeyboard());
 }
 
 function registerHandlers(bot) {
   bot.start((ctx) => {
+    resetSession(ctx.chat.id);
+    return ctx.reply(WELCOME, menuKeyboard());
+  });
+
+  bot.command("reset", (ctx) => {
     resetSession(ctx.chat.id);
     return ctx.reply(WELCOME, menuKeyboard());
   });
@@ -239,6 +282,11 @@ function registerHandlers(bot) {
 
   bot.action("edit_field", (ctx) => {
     ctx.answerCbQuery();
+    const session = getSession(ctx.chat.id);
+    if (session.state !== State.CONFIRM) {
+      return ctx.reply("Редактирование доступно после заполнения анкеты и экрана подтверждения.");
+    }
+
     const buttons = STEPS.map((step) => [
       Markup.button.callback(
         `${step.emoji} ${step.label}`,
@@ -312,10 +360,7 @@ function registerHandlers(bot) {
     const text = ctx.message.text.trim();
 
     if (session.state === State.IDLE) {
-      return ctx.reply(
-        "Нажмите кнопку ниже, чтобы начать оформление заявки.",
-        menuKeyboard(),
-      );
+      return sendAssistantReply(ctx, text);
     }
 
     if (session.state === State.CONFIRM) {
@@ -362,8 +407,18 @@ function registerHandlers(bot) {
 
     if (session.editingField) {
       session.editingField = null;
-      session.state = State.CONFIRM;
-      return sendConfirmation(ctx, session);
+      if (isApplicationComplete(session.data)) {
+        session.state = State.CONFIRM;
+        return sendConfirmation(ctx, session);
+      }
+
+      const missingStep = getFirstMissingStep(session.data);
+      if (missingStep) {
+        session.state = missingStep.state;
+        return ctx.reply(
+          `Продолжим заполнение заявки. Осталось заполнить недостающие поля.\n\n${missingStep.prompt}`,
+        );
+      }
     }
 
     const nextState = getNextState(session.state);
