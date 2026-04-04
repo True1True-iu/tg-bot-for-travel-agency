@@ -1,9 +1,12 @@
 const OpenAI = require("openai");
 const { fetch: undiciFetch, ProxyAgent } = require("undici");
+const fs = require("fs");
+const path = require("path");
 const config = require("./config");
 
 let client = null;
 let proxyDispatcher = null;
+let cachedKnowledge = null;
 
 function getClient() {
   if (!client && config.GROQ_API_KEY) {
@@ -66,6 +69,35 @@ const PRE_START_SYSTEM_PROMPT = [
   "В конце всегда предлагайте следующий шаг: нажать кнопку «Подобрать тур» и оставить заявку.",
 ].join("\n");
 
+function getKnowledgeContext() {
+  if (cachedKnowledge !== null) return cachedKnowledge;
+
+  try {
+    const knowledgePath = path.resolve(__dirname, "..", "knowledge.txt");
+    cachedKnowledge = fs.readFileSync(knowledgePath, "utf-8").trim();
+    return cachedKnowledge;
+  } catch (err) {
+    console.error("[ai] knowledge.txt read failed:", err.message);
+    cachedKnowledge = "";
+    return cachedKnowledge;
+  }
+}
+
+function buildPreStartSystemPrompt() {
+  const knowledge = getKnowledgeContext();
+  if (!knowledge) return PRE_START_SYSTEM_PROMPT;
+
+  return [
+    PRE_START_SYSTEM_PROMPT,
+    "",
+    "Контекст базы знаний (использовать как единственный источник фактов):",
+    knowledge,
+    "",
+    "Жесткое правило: отвечайте только на основе контекста базы знаний выше.",
+    "Если в контексте нет нужной информации, прямо скажите, что в базе знаний нет точного ответа, и предложите оставить заявку.",
+  ].join("\n");
+}
+
 const START_PRICES = [
   { key: "Турция", pattern: /турц/i, from: "80 000" },
   { key: "Египет", pattern: /егип/i, from: "75 000" },
@@ -90,7 +122,7 @@ const PRICE_REQUEST_RE =
 const AGENCY_INTRO_RE =
   /кто\s+вы|что\s+вы\s+за\s+агентств|расскаж(и|ите)\s+о\s+вас|о\s+компан/i;
 const OFFTOPIC_RE =
-  /сколько\s+врем(я|ени)|который\s+час|время\s+сейчас|дата|какая\s+погода|курс\s+доллар|анекдот|гороскоп|рецепт|погода/i;
+  /который\s+час|сколько\s+сейчас\s+времени|время\s+сейчас|текущее\s+время|какая\s+дата|какой\s+сегодня\s+день|какая\s+погода|курс\s+доллар|анекдот|гороскоп|рецепт|погода/i;
 const OFFTOPIC_REPLY =
   "Я помогаю только по вопросам Travel 365: как мы работаем, что нужно для заявки и какие есть стартовые ориентиры цен. " +
   "Нажмите «Подобрать тур», и мы начнем оформление заявки.";
@@ -280,7 +312,7 @@ async function getAssistantMessage(userMessage, history = []) {
   try {
     const res = await createCompletionWithRetries(
       [
-        { role: "system", content: PRE_START_SYSTEM_PROMPT },
+        { role: "system", content: buildPreStartSystemPrompt() },
         ...history,
         { role: "user", content: userMessage },
       ],
