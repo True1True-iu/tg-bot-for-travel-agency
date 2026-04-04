@@ -6,7 +6,7 @@ const config = require("./config");
 
 let client = null;
 let proxyDispatcher = null;
-let cachedKnowledge = null;
+let cachedKnowledgeIndex = null;
 
 function getClient() {
   if (!client && config.GROQ_API_KEY) {
@@ -67,34 +67,95 @@ const PRE_START_SYSTEM_PROMPT = [
   "Тон: дружелюбный, экспертный, краткий, обращение на «вы».",
   "Ответ: 1-4 коротких абзаца, без Markdown.",
   "В конце всегда предлагайте следующий шаг: нажать кнопку «Подобрать тур» и оставить заявку.",
+  "Отвечайте строго на основе переданных фрагментов базы знаний.",
+  "Если данных во фрагментах недостаточно, прямо скажите, что в базе знаний нет точного ответа, и предложите оставить заявку.",
 ].join("\n");
 
-function getKnowledgeContext() {
-  if (cachedKnowledge !== null) return cachedKnowledge;
+const KNOWLEDGE_INDEX_PATH = path.resolve(
+  __dirname,
+  "..",
+  "data",
+  "knowledge.index.json",
+);
+
+function loadKnowledgeIndex() {
+  if (cachedKnowledgeIndex) return cachedKnowledgeIndex;
 
   try {
-    const knowledgePath = path.resolve(__dirname, "..", "knowledge.txt");
-    cachedKnowledge = fs.readFileSync(knowledgePath, "utf-8").trim();
-    return cachedKnowledge;
+    const raw = fs.readFileSync(KNOWLEDGE_INDEX_PATH, "utf-8");
+    cachedKnowledgeIndex = JSON.parse(raw);
+    return cachedKnowledgeIndex;
   } catch (err) {
-    console.error("[ai] knowledge.txt read failed:", err.message);
-    cachedKnowledge = "";
-    return cachedKnowledge;
+    console.error("[rag] knowledge index read failed:", err.message);
+    cachedKnowledgeIndex = null;
+    return null;
   }
 }
 
-function buildPreStartSystemPrompt() {
-  const knowledge = getKnowledgeContext();
-  if (!knowledge) return PRE_START_SYSTEM_PROMPT;
+function tokenize(text) {
+  return String(text)
+    .toLowerCase()
+    .replace(/[^a-zа-яё0-9\s-]/gi, " ")
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+}
+
+function retrieveKnowledge(question, topK = 3) {
+  const index = loadKnowledgeIndex();
+  if (!index || !Array.isArray(index.chunks) || !index.chunks.length) {
+    console.error("[rag] retrieval skipped: index not ready");
+    return [];
+  }
+
+  const qTokens = tokenize(question);
+  if (!qTokens.length) return [];
+
+  const scored = [];
+  for (const chunk of index.chunks) {
+    let score = 0;
+    const tf = chunk.token_freq || {};
+    for (const token of qTokens) {
+      const termFreq = tf[token] || 0;
+      if (!termFreq) continue;
+      const idf = index.idf?.[token] || 1;
+      score += termFreq * idf;
+    }
+    if (score > 0) {
+      scored.push({ chunk, score });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored.slice(0, topK);
+
+  if (top.length) {
+    console.log(
+      "[rag] top fragments:",
+      top.map((x) => `#${x.chunk.id}(${x.score.toFixed(2)})`).join(", "),
+    );
+  } else {
+    console.log("[rag] top fragments: none");
+  }
+
+  return top.map((x) => x.chunk);
+}
+
+function buildPreStartSystemPrompt(fragments) {
+  if (!fragments.length) return PRE_START_SYSTEM_PROMPT;
+
+  const context = fragments
+    .map(
+      (f) =>
+        `Фрагмент #${f.id}\nВопрос: ${f.question}\nОтвет: ${f.answer}`,
+    )
+    .join("\n\n");
 
   return [
     PRE_START_SYSTEM_PROMPT,
     "",
-    "Контекст базы знаний (использовать как единственный источник фактов):",
-    knowledge,
-    "",
-    "Жесткое правило: отвечайте только на основе контекста базы знаний выше.",
-    "Если в контексте нет нужной информации, прямо скажите, что в базе знаний нет точного ответа, и предложите оставить заявку.",
+    "Релевантные фрагменты базы знаний:",
+    context,
   ].join("\n");
 }
 
@@ -275,6 +336,11 @@ async function getRedirectMessage(userMessage, currentQuestion, history = []) {
 }
 
 async function getAssistantMessage(userMessage, history = []) {
+  const fragments = retrieveKnowledge(userMessage, 3);
+  if (!fragments.length) {
+    return unknownFromKnowledgeReply();
+  }
+
   if (isPhoneObjection(userMessage)) {
     return PHONE_OBJECTION_REPLY;
   }
@@ -312,7 +378,7 @@ async function getAssistantMessage(userMessage, history = []) {
   try {
     const res = await createCompletionWithRetries(
       [
-        { role: "system", content: buildPreStartSystemPrompt() },
+        { role: "system", content: buildPreStartSystemPrompt(fragments) },
         ...history,
         { role: "user", content: userMessage },
       ],
@@ -344,6 +410,13 @@ function fallbackAssistant(userMessage = "") {
     priceHint +
     "Я могу рассказать, как работает Travel 365, и назвать стартовые ориентиры цен. " +
     "Для персонального подбора нажмите «Подобрать тур» и оставьте заявку."
+  );
+}
+
+function unknownFromKnowledgeReply() {
+  return (
+    "В базе знаний сейчас нет точного ответа на этот вопрос. " +
+    "Нажмите «Подобрать тур» и оставьте заявку — менеджер уточнит детали и поможет дальше."
   );
 }
 
